@@ -1,0 +1,8 @@
+__pycache__
+generated
+tests
+uploads
+.zcodeignore
+datasources.json
+llm_config.json
+.vscode

@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据源管理平台</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --card: #ffffff; --border: #e3e8f0;
+    --text: #1f2937; --muted: #6b7280;
+    --primary: #2563eb; --primary-dark: #1d4ed8;
+    --danger: #dc2626; --ok: #059669;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; font-size: 14px;
+  }
+  .topbar {
+    background: #fff; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 32px; padding: 0 28px; height: 52px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 700; font-size: 15px; }
+  .menu { display: flex; gap: 6px; height: 100%; }
+  .menu-item {
+    display: flex; align-items: center; padding: 0 16px; cursor: pointer;
+    color: var(--muted); font-size: 14px; border-bottom: 2px solid transparent;
+    user-select: none;
+  }
+  .menu-item:hover { color: var(--text); }
+  .menu-item.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(15,23,42,.05);
+  }
+  .card h2 { font-size: 15px; margin: 0 0 16px; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .card-head h2 { margin: 0; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.full { grid-column: 1 / -1; }
+  .field label { font-weight: 600; font-size: 13px; }
+  .field .hint { color: var(--muted); font-weight: 400; font-size: 12px; }
+  input[type="text"], input[type="password"], textarea {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    font-size: 13px; font-family: inherit; background: #fbfcfe; width: 100%;
+  }
+  input:focus, textarea:focus { outline: 2px solid #bfdbfe; border-color: var(--primary); }
+  textarea { resize: vertical; min-height: 90px; }
+  textarea.code { font-family: Consolas, monospace; font-size: 12px; min-height: 160px; white-space: pre; }
+  .btn {
+    border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer;
+    background: var(--primary); color: #fff; font-family: inherit; text-decoration: none; display: inline-block;
+  }
+  .btn:hover { background: var(--primary-dark); }
+  .btn.secondary { background: #eef2f7; color: var(--text); border: 1px solid var(--border); }
+  .btn.secondary:hover { background: #e2e8f0; }
+  .btn.danger { background: #fff; color: var(--danger); border: 1px solid #fecaca; }
+  .btn.danger:hover { background: #fef2f2; }
+  .btn.small { padding: 5px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  td .name { font-weight: 600; }
+  td .url { color: var(--muted); font-size: 12px; word-break: break-all; }
+  td .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
+  .toast {
+    position: fixed; top: 18px; right: 18px; z-index: 80; padding: 10px 16px;
+    border-radius: 8px; color: #fff; background: var(--ok); font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.15); display: none; max-width: 420px;
+  }
+  .toast.error { background: var(--danger); }
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 50;
+    display: none; align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal {
+    background: #fff; border-radius: 10px; width: 100%; max-width: 860px;
+    max-height: 88vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal.narrow { max-width: 680px; }
+  .modal > header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .modal > header strong { font-size: 14px; }
+  .modal > header .path { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-all; }
+  .modal > header .path.ok { color: var(--ok); }
+  .modal > header .path.err { color: var(--danger); }
+  .run-body { padding: 14px 18px; overflow: auto; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+  .run-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  pre.log-pre, pre.json-pre {
+    margin: 0; padding: 10px 12px; overflow: auto; background: #0f172a;
+    color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; line-height: 1.5;
+    border-radius: 6px; white-space: pre-wrap; word-break: break-all;
+  }
+  pre.log-pre { max-height: 140px; }
+  pre.json-pre { max-height: 48vh; }
+  .modal-body { padding: 18px; overflow: auto; }
+  .modal pre {
+    margin: 0; padding: 16px 18px; overflow: auto; flex: 1; background: #0f172a;
+    color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; line-height: 1.55;
+  }
+  .modal > footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; }
+  .close-x { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--muted); line-height: 1; }
+  .img-thumb { position: relative; width: 64px; height: 64px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .img-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
+  .img-thumb .rm {
+    position: absolute; top: 0; right: 0; width: 18px; height: 18px; line-height: 16px;
+    text-align: center; background: rgba(15,23,42,.7); color: #fff; font-size: 12px;
+    cursor: pointer; border-radius: 0 0 0 4px; user-select: none;
+  }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #fff; border-top-color: transparent;
+          border-radius: 50%; animation: r .7s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<nav class="topbar">
+  <div class="brand">数据源管理平台</div>
+  <div class="menu">
+    <div class="menu-item" data-view="model" onclick="switchView('model')">模型配置</div>
+    <div class="menu-item active" data-view="sources" onclick="switchView('sources')">数据源管理</div>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <!-- ============ 视图一：模型配置 ============ -->
+  <section id="view-model" style="display:none;">
+    <div class="card">
+      <h2>LLM 模型配置 <span class="hint" style="font-weight:400;">OpenAI 兼容接口，保存在本机 llm_config.json</span></h2>
+      <div class="grid">
+        <div class="field">
+          <label>接口地址 BASE URL <span class="hint">自动拼接 /chat/completions，如 https://api.deepseek.com/v1</span></label>
+          <input type="text" id="s-base-url" placeholder="https://api.deepseek.com/v1">
+        </div>
+        <div class="field">
+          <label>模型名 <span class="hint">如 deepseek-chat / glm-4.7 / qwen-plus / gpt-4o</span></label>
+          <input type="text" id="s-model" placeholder="deepseek-chat">
+        </div>
+        <div class="field">
+          <label>API Key <span class="hint" id="s-key-hint">未设置</span></label>
+          <input type="password" id="s-api-key" placeholder="sk-...（留空保持不变）">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <div style="display:flex; gap:10px;">
+            <button class="btn secondary" onclick="saveSettings()">保存设置</button>
+            <button class="btn secondary" id="btn-test" onclick="testSettings()">测试连接</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 视图二：数据源管理 ============ -->
+  <section id="view-sources">
+    <div class="card">
+      <h2>查询条件</h2>
+      <div class="grid">
+        <div class="field">
+          <label>名称 <span class="hint">模糊匹配</span></label>
+          <input type="text" id="q-name" placeholder="按名称关键字查询" onkeydown="if(event.key==='Enter')querySources()">
+        </div>
+        <div class="field">
+          <label>URL <span class="hint">模糊匹配</span></label>
+          <input type="text" id="q-url" placeholder="按 URL 关键字查询" onkeydown="if(event.key==='Enter')querySources()">
+        </div>
+      </div>
+      <div class="actions" style="margin-top:14px;">
+        <button class="btn" onclick="querySources()">查询</button>
+        <button class="btn secondary" onclick="resetQuery()">重置</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>数据源列表</h2>
+        <button class="btn" onclick="openFormModal()">+ 新增</button>
+      </div>
+      <table>
+        <thead>
+          <tr><th style="width:26%;">名称 / URL</th><th>配置摘要</th><th style="width:40%;">操作</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none;">没有匹配的数据源</div>
+    </div>
+  </section>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- ============ 新增/编辑 弹窗 ============ -->
+<div class="modal-mask" id="form-mask">
+  <div class="modal narrow">
+    <header>
+      <strong id="form-title">新增数据源</strong>
+      <button class="close-x" onclick="closeFormModal()">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div class="grid">
+        <div class="field">
+          <label>名称 <span class="hint">*</span></label>
+          <input type="text" id="f-name" placeholder="数据源名称">
+        </div>
+        <div class="field">
+          <label>URL <span class="hint">*</span></label>
+          <input type="text" id="f-url" placeholder="https://...">
+        </div>
+        <div class="field full">
+          <label>提示词 <span class="hint">描述抓取意图与解析要求；初始化时随页面 HTML、示例 JSON 一起发给 LLM，由 LLM 编写解析代码</span></label>
+          <textarea id="f-prompt" placeholder="例如：等待表格渲染完成，按示例 JSON 的分组结构解析每个模型一行，缺失值置空。"></textarea>
+        </div>
+        <div class="field full">
+          <label>提示词配图 <span class="hint">可选，可多张；随提示词一起发给 LLM 补充页面布局说明（需模型支持视觉，如 gpt-4o / glm-4.6v / qwen-vl-max）</span></label>
+          <input type="file" id="f-images" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="padding:6px 0;">
+          <div id="image-previews" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+        </div>
+        <div class="field">
+          <label>上传示例 JSON <span class="hint">上传后填充到下方文本框，可直接编辑</span></label>
+          <input type="file" id="f-file" accept=".json,application/json" style="padding:6px 0;">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+        </div>
+        <div class="field full">
+          <label>示例 JSON <span class="hint">* 决定输出结构：顶层标量键 + 嵌套分组；LLM 以此为输出生成的契约</span></label>
+          <textarea id="f-example" class="code" placeholder='[{"Model": "...", "Features": {"Context Window": "1M", ...}}]'></textarea>
+        </div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn secondary" onclick="closeFormModal()">取消</button>
+      <button class="btn" id="btn-save" onclick="saveSource()">保存</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ============ 生成结果 弹窗 ============ -->
+<div class="modal-mask" id="modal-mask">
+  <div class="modal">
+    <header>
+      <div>
+        <strong id="modal-title">生成的脚本</strong>
+        <div class="path" id="modal-path"></div>
+        <div class="path ok" id="modal-validation"></div>
+      </div>
+      <button class="close-x" onclick="closeModal()">&times;</button>
+    </header>
+    <pre id="modal-code"></pre>
+    <footer>
+      <a class="btn" id="modal-download" download>下载 .py</a>
+      <button class="btn secondary" onclick="closeModal()">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ============ 执行结果 弹窗 ============ -->
+<div class="modal-mask" id="run-mask">
+  <div class="modal">
+    <header>
+      <div>
+        <strong id="run-title">执行结果</strong>
+        <div class="path" id="run-status"></div>
+        <div class="path" id="run-path"></div>
+      </div>
+      <button class="close-x" onclick="closeRunModal()">&times;</button>
+    </header>
+    <div class="run-body">
+      <div class="run-label">日志（stdout / stderr）</div>
+      <pre id="run-log" class="log-pre"></pre>
+      <div class="run-label">输出 JSON</div>
+      <pre id="run-json" class="json-pre"></pre>
+    </div>
+    <footer>
+      <button class="btn secondary" id="run-copy-log" style="display:none;" onclick="copyText(runLogText, 'run-copy-log')">复制日志</button>
+      <button class="btn" id="run-copy" style="display:none;" onclick="copyText(runJsonText, 'run-copy')">复制结果 JSON</button>
+      <button class="btn secondary" onclick="closeRunModal()">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<script>
+let sources = [];
+let editingId = null;
+let runJsonText = '';
+let runLogText = '';
+
+const $ = (id) => document.getElementById(id);
+
+function toast(msg, isError = false) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast' + (isError ? ' error' : '');
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.display = 'none', 3500);
+}
+
+async function api(url, options = {}) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `请求失败 (${res.status})`);
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+/* ---------- 视图切换 ---------- */
+function switchView(name) {
+  document.querySelectorAll('.menu-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.view === name));
+  $('view-model').style.display = name === 'model' ? '' : 'none';
+  $('view-sources').style.display = name === 'sources' ? '' : 'none';
+}
+
+/* ---------- LLM 设置 ---------- */
+function applySettings(s) {
+  $('s-base-url').value = s.base_url || '';
+  $('s-model').value = s.model || '';
+  $('s-key-hint').textContent = s.has_key
+    ? (s.api_key_masked && !s.api_key_masked.includes('已设置') ? `已设置（${s.api_key_masked}）` : '已设置')
+    : '未设置';
+}
+
+async function loadSettings() {
+  applySettings(await api('/api/settings'));
+}
+
+async function saveSettingsSilently() {
+  const s = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ base_url: $('s-base-url').value, model: $('s-model').value, api_key: $('s-api-key').value }),
+  });
+  $('s-api-key').value = '';
+  applySettings(s);
+}
+
+async function saveSettings() {
+  try {
+    await saveSettingsSilently();
+    toast('LLM 设置已保存');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function testSettings() {
+  const btn = $('btn-test');
+  btn.disabled = true; btn.textContent = '测试中…';
+  try {
+    await saveSettingsSilently();
+    const r = await api('/api/settings/test', { method: 'POST', body: '{}' });
+    toast(`连接正常，模型回复：${r.reply}`);
+  } catch (err) {
+    toast('连接失败：' + err.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = '测试连接';
+  }
+}
+
+/* ---------- 查询 ---------- */
+function querySources() { loadSources(); }
+
+function resetQuery() {
+  $('q-name').value = '';
+  $('q-url').value = '';
+  loadSources();
+}
+
+/* ---------- 数据源 CRUD ---------- */
+async function loadSources() {
+  const params = new URLSearchParams();
+  if ($('q-name').value.trim()) params.set('name', $('q-name').value.trim());
+  if ($('q-url').value.trim()) params.set('url', $('q-url').value.trim());
+  const qs = params.toString();
+  sources = await api('/api/sources' + (qs ? '?' + qs : ''));
+  render();
+}
+
+let formImages = [];  // {name, previewUrl} existing | {dataUrl} newly added
+
+function renderImagePreviews() {
+  $('image-previews').innerHTML = formImages.map((it, i) => `
+    <div class="img-thumb">
+      <img src="${it.previewUrl || it.dataUrl}" title="${it.name || '新配图'}">
+      <span class="rm" onclick="removeImage(${i})">×</span>
+    </div>`).join('');
+}
+
+function removeImage(i) { formImages.splice(i, 1); renderImagePreviews(); }
+
+$('f-images').addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      formImages.push({ dataUrl: reader.result, name: file.name });
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  }
+  e.target.value = '';
+});
+
+$('f-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => { $('f-example').value = reader.result; };
+  reader.readAsText(file, 'utf-8');
+  e.target.value = '';
+});
+
+function openFormModal(id = null) {
+  editingId = id;
+  const s = id ? sources.find(x => x.id === id) : null;
+  $('form-title').textContent = s ? `编辑数据源：${s.name}` : '新增数据源';
+  $('f-name').value = s ? s.name : '';
+  $('f-url').value = s ? s.url : '';
+  $('f-prompt').value = s ? (s.prompt || '') : '';
+  formImages = (s && s.images ? s.images : [])
+    .map(name => ({ name, previewUrl: `/api/sources/${s.id}/images/${name}` }));
+  renderImagePreviews();
+  $('f-example').value = s ? JSON.stringify(s.example, null, 2) : '';
+  $('form-mask').style.display = 'flex';
+}
+
+function closeFormModal() { $('form-mask').style.display = 'none'; }
+$('form-mask').addEventListener('click', (e) => { if (e.target === $('form-mask')) closeFormModal(); });
+
+async function saveSource() {
+  const payload = {
+    name: $('f-name').value,
+    url: $('f-url').value,
+    prompt: $('f-prompt').value,
+    example: $('f-example').value,
+    images: formImages.map(it => it.dataUrl || it.name),
+  };
+  $('btn-save').disabled = true;
+  try {
+    if (editingId) {
+      await api(`/api/sources/${editingId}`, { method: 'PUT', body: JSON.stringify(payload) });
+      toast('已更新');
+    } else {
+      await api('/api/sources', { method: 'POST', body: JSON.stringify(payload) });
+      toast('已创建');
+    }
+    closeFormModal();
+    await loadSources();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    $('btn-save').disabled = false;
+  }
+}
+
+async function deleteSource(id) {
+  const s = sources.find(x => x.id === id);
+  if (!confirm(`确认删除数据源「${s ? s.name : id}」？`)) return;
+  try {
+    await api(`/api/sources/${id}`, { method: 'DELETE' });
+    toast('已删除');
+    await loadSources();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/* ---------- 初始化（LLM 生成脚本） ---------- */
+async function generateSource(id) {
+  const s = sources.find(x => x.id === id);
+  const btn = document.querySelector(`button[data-gen="${id}"]`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>LLM 生成中'; }
+  $('modal-title').textContent = '正在生成脚本：' + (s ? s.name : '');
+  $('modal-path').textContent = '正在抓取页面并调用 LLM 编写脚本（含本地验证，最长可能需要几分钟，请勿关闭页面）…';
+  $('modal-validation').textContent = '';
+  $('modal-code').textContent = '';
+  $('modal-download').style.display = 'none';
+  $('modal-mask').style.display = 'flex';
+  try {
+    const result = await api(`/api/sources/${id}/generate`, { method: 'POST', body: '{}' });
+    const retries = result.attempts.length > 1 ? `（第 ${result.attempts.length} 次尝试通过）` : '';
+    $('modal-title').textContent = '生成的脚本：' + (s ? s.name : '');
+    $('modal-path').textContent = '已保存到 ' + result.path + (result.fetch_note ? ' ⚠ ' + result.fetch_note : '');
+    $('modal-validation').textContent = '✅ ' + result.validation + ' ' + retries;
+    $('modal-code').textContent = result.code;
+    $('modal-download').style.display = '';
+    $('modal-download').href = `/api/sources/${id}/download`;
+    toast('脚本生成成功，已通过本地验证');
+  } catch (err) {
+    let detail = err.message;
+    if (err.body && Array.isArray(err.body.attempts) && err.body.attempts.length) {
+      detail = err.message + '\n\n' + err.body.attempts
+        .map(a => `第 ${a.attempt} 次尝试：${a.ok ? '通过' : '未通过'}\n${a.message}`)
+        .join('\n\n');
+    }
+    $('modal-title').textContent = '生成失败';
+    $('modal-path').textContent = err.body && err.body.fetch_note ? '⚠ ' + err.body.fetch_note : '';
+    $('modal-validation').textContent = '';
+    $('modal-code').textContent = detail;
+    toast('脚本生成失败，详情见弹窗', true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '初始化'; }
+  }
+}
+
+function closeModal() { $('modal-mask').style.display = 'none'; }
+$('modal-mask').addEventListener('click', (e) => { if (e.target === $('modal-mask')) closeModal(); });
+
+/* ---------- 测试脚本（真实执行） ---------- */
+function copyText(text, btnId) {
+  const done = () => toast('已复制到剪贴板');
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (err) { toast('复制失败，请手动选择复制', true); }
+  document.body.removeChild(ta);
+}
+
+async function runScript(id) {
+  const s = sources.find(x => x.id === id);
+  const btn = document.querySelector(`button[data-run="${id}"]`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>执行中'; }
+  $('run-title').textContent = '执行结果：' + (s ? s.name : '');
+  $('run-status').textContent = '正在执行脚本（真实抓取页面，最长约 5 分钟，请勿关闭页面）…';
+  $('run-status').className = 'path';
+  $('run-path').textContent = '';
+  $('run-log').textContent = '';
+  $('run-json').textContent = '';
+  $('run-copy').style.display = 'none';
+  $('run-copy-log').style.display = 'none';
+  runJsonText = '';
+  runLogText = '';
+  $('run-mask').style.display = 'flex';
+  try {
+    const r = await api(`/api/sources/${id}/run`, { method: 'POST', body: '{}' });
+    $('run-path').textContent = '输出文件：' + r.output_path;
+    if (r.ok) {
+      $('run-status').textContent = `✅ 执行成功（exit ${r.exit_code}，耗时 ${r.duration_s}s）`;
+      $('run-status').className = 'path ok';
+    } else {
+      $('run-status').textContent = `❌ 执行失败（exit ${r.exit_code === null ? '超时' : r.exit_code}，耗时 ${r.duration_s}s）`;
+      $('run-status').className = 'path err';
+    }
+    runLogText = ((r.stdout || '') + (r.stderr ? '\n--- stderr ---\n' + r.stderr : '')).trim();
+    $('run-log').textContent = runLogText || '(无日志输出)';
+    $('run-copy-log').style.display = runLogText ? '' : 'none';
+    runJsonText = r.result_text || '';
+    if (runJsonText) {
+      const LIMIT = 50000;
+      $('run-json').textContent = runJsonText.length > LIMIT
+        ? runJsonText.slice(0, LIMIT) + `\n\n…（共 ${runJsonText.length} 字符，显示已截断；复制按钮复制完整内容）`
+        : runJsonText;
+      $('run-copy').style.display = '';
+    } else {
+      $('run-json').textContent = '(未产生输出 JSON)';
+    }
+  } catch (err) {
+    $('run-status').textContent = '❌ ' + err.message;
+    $('run-status').className = 'path err';
+    $('run-log').textContent = err.body ? JSON.stringify(err.body, null, 2) : '';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '测试脚本'; }
+  }
+}
+
+function closeRunModal() { $('run-mask').style.display = 'none'; }
+$('run-mask').addEventListener('click', (e) => { if (e.target === $('run-mask')) closeRunModal(); });
+
+/* ---------- 渲染 ---------- */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render() {
+  const tbody = $('tbody');
+  $('empty').style.display = sources.length ? 'none' : '';
+  tbody.innerHTML = sources.map(s => {
+    const recs = Array.isArray(s.example) ? s.example.length : 1;
+    const first = Array.isArray(s.example) ? s.example[0] : s.example;
+    const groups = first ? Object.keys(first).filter(k => typeof first[k] === 'object').length : 0;
+    return `<tr>
+      <td>
+        <div class="name">${escapeHtml(s.name)}</div>
+        <div class="url">${escapeHtml(s.url)}</div>
+        <div class="meta">更新于 ${escapeHtml(s.updated_at || '')}</div>
+      </td>
+      <td>
+        <div class="meta">示例：${recs} 条记录 · ${groups} 个分组${s.images && s.images.length ? ` · 配图 ${s.images.length} 张` : ''}</div>
+        <div class="meta">提示词：${s.prompt ? escapeHtml(s.prompt.length > 40 ? s.prompt.slice(0, 40) + '…' : s.prompt) : '—'}</div>
+      </td>
+      <td>
+        <div class="row-actions">
+          <button class="btn small" data-gen="${s.id}" onclick="generateSource('${s.id}')">初始化</button>
+          <button class="btn small secondary" data-run="${s.id}" onclick="runScript('${s.id}')">测试脚本</button>
+          <a class="btn small secondary" href="/api/sources/${s.id}/download" download>下载脚本</a>
+          <button class="btn small secondary" onclick="openFormModal('${s.id}')">编辑</button>
+          <button class="btn small danger" onclick="deleteSource('${s.id}')">删除</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+loadSources().catch(err => toast(err.message, true));
+loadSettings().catch(() => {});
+</script>
+</body>
+</html>
