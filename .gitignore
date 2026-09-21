@@ -1,8 +1,10 @@
 __pycache__
-generated
+data
 tests
-uploads
 .zcodeignore
 datasources.json
 llm_config.json
+shovel.db*
+*.json.migrated
 .vscode
+.zcode

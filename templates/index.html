@@ -108,6 +108,18 @@
     color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; line-height: 1.55;
   }
   .modal > footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; }
+  #gen-progress {
+    margin: 0 18px 12px; padding: 10px 14px; background: #f6f8fb; border: 1px solid var(--border);
+    border-radius: 8px; max-height: 200px; overflow: auto; font-size: 12.5px; line-height: 2; flex-shrink: 0;
+  }
+  #gen-progress:empty { display: none; }
+  #gen-progress .gp-icon { display: inline-block; width: 22px; text-align: center; }
+  #gen-progress .spin { border-color: var(--primary); border-top-color: transparent; margin-right: 0; }
+  #gen-progress .gp-ok { color: var(--ok); }
+  #gen-progress .gp-fail { color: var(--danger); }
+  #gen-progress .gp-running { color: var(--primary); }
+  #gen-progress .gp-info { color: var(--muted); }
+  #gen-progress .gp-phase { font-weight: 600; margin: 6px 0 2px; color: #0f172a; }
   .close-x { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--muted); line-height: 1; }
   .img-thumb { position: relative; width: 64px; height: 64px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
   .img-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
@@ -119,6 +131,23 @@
   .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #fff; border-top-color: transparent;
           border-radius: 50%; animation: r .7s linear infinite; vertical-align: -1px; margin-right: 6px; }
   @keyframes r { to { transform: rotate(360deg); } }
+  .chat-history {
+    max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 8px;
+    padding: 4px 2px; background: #fbfcfe; border: 1px solid var(--border); border-radius: 6px;
+  }
+  .chat-history:empty { display: none; }
+  .chat-msg {
+    padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word; max-width: 92%;
+  }
+  .chat-msg.user { align-self: flex-end; background: var(--primary); color: #fff; }
+  .chat-msg.ai { align-self: flex-start; background: #eef2f7; border: 1px solid var(--border); }
+  .chat-msg.ai.err { background: #fef2f2; border-color: #fecaca; color: var(--danger); }
+  .lightbox-mask {
+    position: fixed; inset: 0; background: rgba(15,23,42,.82); z-index: 90;
+    display: none; align-items: center; justify-content: center; padding: 32px; cursor: zoom-out;
+  }
+  .lightbox-mask img { max-width: 92vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0,0,0,.5); }
 </style>
 </head>
 <body>
@@ -136,14 +165,14 @@
   <!-- ============ 视图一：模型配置 ============ -->
   <section id="view-model" style="display:none;">
     <div class="card">
-      <h2>LLM 模型配置 <span class="hint" style="font-weight:400;">OpenAI 兼容接口，保存在本机 llm_config.json</span></h2>
+      <h2>LLM 模型配置 <span class="hint" style="font-weight:400;">（OpenAI 兼容接口）</span></h2>
       <div class="grid">
         <div class="field">
-          <label>接口地址 BASE URL <span class="hint">自动拼接 /chat/completions，如 https://api.deepseek.com/v1</span></label>
+          <label>接口地址</label>
           <input type="text" id="s-base-url" placeholder="https://api.deepseek.com/v1">
         </div>
         <div class="field">
-          <label>模型名 <span class="hint">如 deepseek-chat / glm-4.7 / qwen-plus / gpt-4o</span></label>
+          <label>模型名称</label>
           <input type="text" id="s-model" placeholder="deepseek-chat">
         </div>
         <div class="field">
@@ -198,6 +227,11 @@
 
 </div>
 
+<!-- ============ 图片预览 弹层 ============ -->
+<div class="lightbox-mask" id="lightbox-mask">
+  <img id="lightbox-img" alt="预览">
+</div>
+
 <div class="toast" id="toast"></div>
 
 <!-- ============ 新增/编辑 弹窗 ============ -->
@@ -219,23 +253,45 @@
         </div>
         <div class="field full">
           <label>提示词 <span class="hint">描述抓取意图与解析要求；初始化时随页面 HTML、示例 JSON 一起发给 LLM，由 LLM 编写解析代码</span></label>
-          <textarea id="f-prompt" placeholder="例如：等待表格渲染完成，按示例 JSON 的分组结构解析每个模型一行，缺失值置空。"></textarea>
+          <textarea id="f-prompt" placeholder="例如：等待表格渲染完成，按示例 JSON 的结构解析每个数据行。"></textarea>
         </div>
         <div class="field full">
-          <label>提示词配图 <span class="hint">可选，可多张；随提示词一起发给 LLM 补充页面布局说明（需模型支持视觉，如 gpt-4o / glm-4.6v / qwen-vl-max）</span></label>
-          <input type="file" id="f-images" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="padding:6px 0;">
+          <label>提示词配图 <span class="hint">支持 Ctrl+V 粘贴（需模型支持视觉）</span></label>
+          <input type="file" id="f-images" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn small secondary" type="button" onclick="choosePromptImages()">选择文件</button>
+            <span class="hint" id="f-images-count"></span>
+          </div>
           <div id="image-previews" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
         </div>
         <div class="field">
           <label>上传示例 JSON <span class="hint">上传后填充到下方文本框，可直接编辑</span></label>
-          <input type="file" id="f-file" accept=".json,application/json" style="padding:6px 0;">
+          <input type="file" id="f-file" accept=".json,application/json" hidden>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn small secondary" type="button" onclick="chooseExampleFile()">选择文件</button>
+            <span class="hint" id="f-file-name"></span>
+          </div>
         </div>
         <div class="field">
           <label>&nbsp;</label>
         </div>
         <div class="field full">
-          <label>示例 JSON <span class="hint">* 决定输出结构：顶层标量键 + 嵌套分组；LLM 以此为输出生成的契约</span></label>
+          <label>示例 JSON <span class="hint">* 决定输出结构：LLM 以此为输出生成的契约</span></label>
           <textarea id="f-example" class="code" placeholder='[{"Model": "...", "Features": {"Context Window": "1M", ...}}]'></textarea>
+        </div>
+        <div class="field full" id="chat-field" style="border-top:1px solid var(--border); padding-top:16px;">
+          <label>AI 调试对话 <span class="hint">测试脚本发现输出 JSON 有问题时，在这里与 LLM 对话进行调整</span></label>
+          <div id="chat-history" class="chat-history"></div>
+          <div style="display:flex; gap:8px; margin-top:8px; align-items:flex-end;">
+            <textarea id="chat-input" style="min-height:56px;"></textarea>
+            <button class="btn" id="btn-refine" onclick="sendRefine()" style="flex:0 0 auto; min-width:76px;">发送</button>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">
+            <button class="btn small secondary" type="button" onclick="chooseChatImages()">上传图片</button>
+            <span class="hint">截图仅随本轮「发送」带给模型（支持 Ctrl+V 粘贴）</span>
+            <div id="chat-image-previews" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+          </div>
+          <input type="file" id="chat-img-file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         </div>
       </div>
     </div>
@@ -257,9 +313,9 @@
       </div>
       <button class="close-x" onclick="closeModal()">&times;</button>
     </header>
-    <pre id="modal-code"></pre>
+    <div id="gen-progress"></div>
     <footer>
-      <a class="btn" id="modal-download" download>下载 .py</a>
+      <button class="btn" id="modal-download">下载 .py</button>
       <button class="btn secondary" onclick="closeModal()">关闭</button>
     </footer>
   </div>
@@ -283,6 +339,7 @@
       <pre id="run-json" class="json-pre"></pre>
     </div>
     <footer>
+      <button class="btn secondary" id="run-refine" style="display:none; margin-right:auto;" onclick="openRefineFromRun()">结果不对？AI 调整脚本</button>
       <button class="btn secondary" id="run-copy-log" style="display:none;" onclick="copyText(runLogText, 'run-copy-log')">复制日志</button>
       <button class="btn" id="run-copy" style="display:none;" onclick="copyText(runJsonText, 'run-copy')">复制结果 JSON</button>
       <button class="btn secondary" onclick="closeRunModal()">关闭</button>
@@ -295,6 +352,7 @@ let sources = [];
 let editingId = null;
 let runJsonText = '';
 let runLogText = '';
+let runSourceId = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -319,6 +377,27 @@ async function api(url, options = {}) {
     throw err;
   }
   return data;
+}
+
+async function downloadScript(id) {
+  // fetch first: a missing script must surface as a toast, not as the
+  // browser's own "can't extract file" download failure
+  const res = await fetch(`/api/sources/${id}/download`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    toast(data.error || `下载失败 (${res.status})`, true);
+    return;
+  }
+  const cd = res.headers.get('Content-Disposition') || '';
+  const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+  let name = m ? m[1] : 'script.py';
+  try { name = decodeURIComponent(name); } catch (e) { /* keep raw name */ }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ---------- 视图切换 ---------- */
@@ -394,16 +473,54 @@ async function loadSources() {
 }
 
 let formImages = [];  // {name, previewUrl} existing | {dataUrl} newly added
+let chatImages = [];  // {dataUrl} 对话配图，仅随本轮发送，不保存
 
 function renderImagePreviews() {
   $('image-previews').innerHTML = formImages.map((it, i) => `
     <div class="img-thumb">
-      <img src="${it.previewUrl || it.dataUrl}" title="${it.name || '新配图'}">
+      <img src="${it.previewUrl || it.dataUrl}" title="${it.name || '新配图'}（点击预览）">
       <span class="rm" onclick="removeImage(${i})">×</span>
     </div>`).join('');
+  const countEl = $('f-images-count');
+  if (countEl) countEl.textContent = formImages.length ? `已选 ${formImages.length} 张` : '';
 }
 
 function removeImage(i) { formImages.splice(i, 1); renderImagePreviews(); }
+
+function renderChatImages() {
+  const box = $('chat-image-previews');
+  if (!box) return;
+  box.innerHTML = chatImages.map((it, i) => `
+    <div class="img-thumb">
+      <img src="${it.dataUrl}" title="点击预览">
+      <span class="rm" onclick="removeChatImage(${i})">×</span>
+    </div>`).join('');
+}
+
+function removeChatImage(i) { chatImages.splice(i, 1); renderChatImages(); }
+
+function chooseChatImages() { $('chat-img-file').click(); }
+function choosePromptImages() { $('f-images').click(); }
+function chooseExampleFile() { $('f-file').click(); }
+
+/* ---------- 图片预览（大图弹层） ---------- */
+function openLightbox(src) {
+  $('lightbox-img').src = src;
+  $('lightbox-mask').style.display = 'flex';
+}
+function closeLightbox() {
+  $('lightbox-mask').style.display = 'none';
+  $('lightbox-img').removeAttribute('src');
+}
+$('lightbox-mask').addEventListener('click', closeLightbox);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+// 点击缩略图放大预览（对话区与配图区共用）
+$('image-previews').addEventListener('click', (e) => {
+  if (e.target.tagName === 'IMG') openLightbox(e.target.src);
+});
+$('chat-image-previews').addEventListener('click', (e) => {
+  if (e.target.tagName === 'IMG') openLightbox(e.target.src);
+});
 
 $('f-images').addEventListener('change', (e) => {
   for (const file of e.target.files) {
@@ -417,9 +534,53 @@ $('f-images').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
+$('chat-img-file').addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      chatImages.push({ dataUrl: reader.result, name: file.name });
+      renderChatImages();
+    };
+    reader.readAsDataURL(file);
+  }
+  e.target.value = '';
+});
+
+// Ctrl+V 粘贴剪贴板截图：焦点在 AI 对话区时贴给本轮对话配图，否则贴给提示词配图
+// （仅在剪贴板内容为图片时拦截，不影响文本粘贴）
+$('form-mask').addEventListener('paste', (e) => {
+  const items = (e.clipboardData || {}).items;
+  if (!items) return;
+  const inChat = !!(e.target && e.target.closest && e.target.closest('#chat-field'));
+  let handled = false;
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      handled = true;
+      const ext = (item.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (inChat) {
+          chatImages.push({ dataUrl: reader.result, name: file.name || `clipboard_${Date.now()}.${ext}` });
+          renderChatImages();
+          toast('已从剪贴板添加对话配图');
+        } else {
+          formImages.push({ dataUrl: reader.result, name: file.name || `clipboard_${Date.now()}.${ext}` });
+          renderImagePreviews();
+          toast('已从剪贴板添加配图');
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+  if (handled) e.preventDefault();
+});
+
 $('f-file').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  $('f-file-name').textContent = file.name;
   const reader = new FileReader();
   reader.onload = () => { $('f-example').value = reader.result; };
   reader.readAsText(file, 'utf-8');
@@ -437,7 +598,81 @@ function openFormModal(id = null) {
     .map(name => ({ name, previewUrl: `/api/sources/${s.id}/images/${name}` }));
   renderImagePreviews();
   $('f-example').value = s ? JSON.stringify(s.example, null, 2) : '';
+  chatHistory = [];
+  chatFeedbacks = [];
+  chatImages = [];
+  renderChat();
+  renderChatImages();
+  $('f-file-name').textContent = '';
   $('form-mask').style.display = 'flex';
+}
+
+/* ---------- AI 调试对话（脚本修正） ---------- */
+let chatHistory = [];    // 聊天展示记录 {role:'user'|'ai', text, err?}
+let chatFeedbacks = [];  // 已成功应用的修改要求，作为后续轮次的上下文
+
+function renderChat() {
+  const box = $('chat-history');
+  if (!box) return;
+  box.innerHTML = chatHistory.map(m => {
+    const attach = m.imgCount ? `\n📎 附图 ×${m.imgCount}（仅本轮发送）` : '';
+    return `<div class="chat-msg ${m.role}${m.err ? ' err' : ''}">${escapeHtml(m.text + attach)}</div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendRefine() {
+  if (!editingId) {
+    toast('新数据源请先保存并「初始化」生成脚本后，再使用 AI 调试', true);
+    return;
+  }
+  const text = $('chat-input').value.trim();
+  if (!text) return;
+  const attachedImages = chatImages.map(it => it.dataUrl);
+  chatHistory.push({ role: 'user', text, imgCount: attachedImages.length });
+  chatHistory.push({ role: 'ai', text: '正在结合当前脚本、最近运行输出与页面表格片段修改脚本，并进行本地验证（可能需要几分钟）…' });
+  renderChat();
+  $('chat-input').value = '';
+  const btn = $('btn-refine');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>AI 修改中';
+  try {
+    const r = await api(`/api/sources/${editingId}/refine`, {
+      method: 'POST',
+      body: JSON.stringify({ message: text, history: chatFeedbacks, images: attachedImages }),
+    });
+    chatHistory.pop();
+    chatHistory.push({
+      role: 'ai',
+      text: `✅ 脚本已更新并通过本地验证（第 ${r.attempts.length} 次尝试）：${r.validation}\n点击列表中的「测试脚本」可查看新结果。`,
+    });
+    chatFeedbacks.push(text);
+    toast('脚本已更新');
+  } catch (err) {
+    chatHistory.pop();
+    chatHistory.push({
+      role: 'ai', err: true,
+      text: `❌ 修改未成功：${err.message}\n脚本保持原样；可补充说明后重试，或到「LLM 设置」检查模型配置。`,
+    });
+    toast('AI 修改失败，详见对话区', true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '发送';
+    chatImages = [];  // 对话配图仅限本轮，随发送即清空
+    renderChatImages();
+    renderChat();
+  }
+}
+
+function openRefineFromRun() {
+  const id = runSourceId;
+  closeRunModal();
+  openFormModal(id);
+  setTimeout(() => {
+    const box = $('chat-history');
+    if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $('chat-input').focus();
+  }, 80);
 }
 
 function closeFormModal() { $('form-mask').style.display = 'none'; }
@@ -482,6 +717,40 @@ async function deleteSource(id) {
 }
 
 /* ---------- 初始化（LLM 生成脚本） ---------- */
+let genPollTimer = null;
+
+function renderProgress(events) {
+  const box = $('gen-progress');
+  box.innerHTML = (events || []).map(e => {
+    if (e.status === 'phase') return `<div class="gp-phase">${escapeHtml(e.text)}</div>`;
+    const icon = e.status === 'ok' ? '✓' : e.status === 'fail' ? '✗'
+      : e.status === 'running' ? '<span class="spin"></span>' : '·';
+    const cls = e.status === 'running' ? 'gp-running' : 'gp-' + e.status;
+    return `<div class="${cls}"><span class="gp-icon">${icon}</span>${escapeHtml(e.text)}</div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function refreshProgress(id) {
+  api(`/api/sources/${id}/generate/progress`)
+    .then(p => renderProgress(p.events))
+    .catch(() => {});
+}
+
+function startProgressPoll(id) {
+  stopProgressPoll();
+  const poll = () => api(`/api/sources/${id}/generate/progress`).then(p => {
+    renderProgress(p.events);
+    if (p.done) stopProgressPoll();
+  }).catch(() => {});
+  poll();
+  genPollTimer = setInterval(poll, 1000);
+}
+
+function stopProgressPoll() {
+  if (genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
+}
+
 async function generateSource(id) {
   const s = sources.find(x => x.id === id);
   const btn = document.querySelector(`button[data-gen="${id}"]`);
@@ -489,37 +758,37 @@ async function generateSource(id) {
   $('modal-title').textContent = '正在生成脚本：' + (s ? s.name : '');
   $('modal-path').textContent = '正在抓取页面并调用 LLM 编写脚本（含本地验证，最长可能需要几分钟，请勿关闭页面）…';
   $('modal-validation').textContent = '';
-  $('modal-code').textContent = '';
+  $('modal-validation').className = 'path';
   $('modal-download').style.display = 'none';
+  $('gen-progress').innerHTML = '';
   $('modal-mask').style.display = 'flex';
+  startProgressPoll(id);
   try {
     const result = await api(`/api/sources/${id}/generate`, { method: 'POST', body: '{}' });
+    stopProgressPoll();
+    refreshProgress(id);
     const retries = result.attempts.length > 1 ? `（第 ${result.attempts.length} 次尝试通过）` : '';
     $('modal-title').textContent = '生成的脚本：' + (s ? s.name : '');
-    $('modal-path').textContent = '已保存到 ' + result.path + (result.fetch_note ? ' ⚠ ' + result.fetch_note : '');
+    $('modal-path').textContent = result.fetch_note ? '⚠ ' + result.fetch_note : '';
+    $('modal-validation').className = 'path ok';
     $('modal-validation').textContent = '✅ ' + result.validation + ' ' + retries;
-    $('modal-code').textContent = result.code;
     $('modal-download').style.display = '';
-    $('modal-download').href = `/api/sources/${id}/download`;
+    $('modal-download').onclick = () => downloadScript(id);
     toast('脚本生成成功，已通过本地验证');
   } catch (err) {
-    let detail = err.message;
-    if (err.body && Array.isArray(err.body.attempts) && err.body.attempts.length) {
-      detail = err.message + '\n\n' + err.body.attempts
-        .map(a => `第 ${a.attempt} 次尝试：${a.ok ? '通过' : '未通过'}\n${a.message}`)
-        .join('\n\n');
-    }
+    stopProgressPoll();
+    refreshProgress(id);
     $('modal-title').textContent = '生成失败';
     $('modal-path').textContent = err.body && err.body.fetch_note ? '⚠ ' + err.body.fetch_note : '';
-    $('modal-validation').textContent = '';
-    $('modal-code').textContent = detail;
+    $('modal-validation').className = 'path err';
+    $('modal-validation').textContent = '❌ ' + err.message + '（详情见下方进度）';
     toast('脚本生成失败，详情见弹窗', true);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '初始化'; }
   }
 }
 
-function closeModal() { $('modal-mask').style.display = 'none'; }
+function closeModal() { stopProgressPoll(); $('modal-mask').style.display = 'none'; }
 $('modal-mask').addEventListener('click', (e) => { if (e.target === $('modal-mask')) closeModal(); });
 
 /* ---------- 测试脚本（真实执行） ---------- */
@@ -544,6 +813,7 @@ function fallbackCopy(text, done) {
 }
 
 async function runScript(id) {
+  runSourceId = id;
   const s = sources.find(x => x.id === id);
   const btn = document.querySelector(`button[data-run="${id}"]`);
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>执行中'; }
@@ -555,6 +825,7 @@ async function runScript(id) {
   $('run-json').textContent = '';
   $('run-copy').style.display = 'none';
   $('run-copy-log').style.display = 'none';
+  $('run-refine').style.display = '';
   runJsonText = '';
   runLogText = '';
   $('run-mask').style.display = 'flex';
@@ -619,7 +890,7 @@ function render() {
         <div class="row-actions">
           <button class="btn small" data-gen="${s.id}" onclick="generateSource('${s.id}')">初始化</button>
           <button class="btn small secondary" data-run="${s.id}" onclick="runScript('${s.id}')">测试脚本</button>
-          <a class="btn small secondary" href="/api/sources/${s.id}/download" download>下载脚本</a>
+          <button class="btn small secondary" onclick="downloadScript('${s.id}')">下载脚本</button>
           <button class="btn small secondary" onclick="openFormModal('${s.id}')">编辑</button>
           <button class="btn small danger" onclick="deleteSource('${s.id}')">删除</button>
         </div>

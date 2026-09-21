@@ -6,8 +6,9 @@ and a fragment of the live page's table HTML, and writes the complete script
 itself. The produced code is then validated locally —
 
   1. syntax check (compile),
-  2. a ``--from-html`` dry run against the captured page HTML,
-  3. structure check of the dry run's JSON output against the example.
+  2. a live run of the script (real browser fetch, so any page interactions
+     the prompt asks for — expanding columns, clicking, … — actually happen),
+  3. structure check of the run's JSON output against the example.
 
 — and failures are fed back to the model for up to MAX_ATTEMPTS rounds.
 """
@@ -19,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,7 +29,7 @@ from bs4 import BeautifulSoup
 
 MAX_ATTEMPTS = 3
 CHAT_TIMEOUT_S = 300
-DRYRUN_TIMEOUT_S = 120
+LIVE_TIMEOUT_S = 300  # live validation run: browser + page load + interactions
 MAX_CONTEXT_CHARS = 150_000
 
 SYSTEM_PROMPT = """你是一名资深 Python 爬虫工程师。请根据用户提供的【数据源配置】、【示例 JSON】、【目标页面表格 HTML 片段】以及可能附带的页面截图（提示词配图），编写一个完整的、可独立运行的 Python 脚本。
@@ -51,8 +53,49 @@ URL：{url}
 【示例 JSON —— 输出必须严格符合此结构】
 {example}
 
-【目标页面表格 HTML 片段】{table_note}
+【目标页面 HTML 片段】（已去掉 script/style；过长会被截断；数据可能在表格或其他结构中，请自行判断）
 {table_html}"""
+
+REFINE_SYSTEM_PROMPT = """你是一名资深 Python 爬虫工程师。用户已有一个由你编写的可运行抓取脚本，
+但实际运行输出的 JSON 存在问题。请根据【当前脚本】、【最近一次实际运行输出】、
+【目标页面表格 HTML 片段】以及用户的【修改要求】，输出修改后的完整脚本。
+
+硬性要求：
+1. 单文件脚本；依赖只允许 playwright、beautifulsoup4 和 Python 标准库。
+2. 浏览器必须用 Playwright 自带 Chromium：p.chromium.launch(headless=...)，禁止使用 channel 参数，禁止下载浏览器。
+3. 保持命令行参数约定不变：-o/--output（输出 JSON 路径，默认 {output_default}）、--url（覆盖 URL）、--headed（有头模式）、--from-html <file>（直接解析已保存的 HTML 文件，绝不启动浏览器）、--save-html <file>（保存 page.content() 原始 HTML）。无论哪种模式、解析结果是否为空，都必须把结果 JSON 写到 -o/--output 指定的路径（解析为空时写出空数组）。
+4. 输出 JSON 结构必须与示例 JSON 完全一致：相同的顶层键与嵌套分组、相同的键名——除非用户在修改要求中明确要求改变结构；页面中匹配不到的列直接丢弃；缺失值（如 "--"）输出为空字符串 ""。
+5. 只输出 Python 代码本体：不要 markdown 代码围栏，不要任何解释文字。"""
+
+REFINE_USER_PROMPT = """【数据源配置】
+名称：{name}
+URL：{url}
+提示词（抓取与解析要求，请严格遵守）：{prompt}
+
+【示例 JSON —— 输出必须严格符合此结构】
+{example}
+
+【目标页面 HTML 片段】（已去掉 script/style；过长会被截断；数据可能在表格或其他结构中，请自行判断）
+{table_html}
+
+【当前脚本（在此基础上修改）】
+{current_code}
+
+【最近一次实际运行输出 JSON（截取）】
+{result_excerpt}
+
+【最近一次运行日志（截取）】
+{log_excerpt}
+
+【此前各轮修改要求（按时间顺序，均已体现在当前脚本中）】
+{prior_block}
+
+【本轮用户配图】{images_note}
+
+【本轮修改要求】
+{feedback}
+
+请输出修改后的完整脚本。"""
 
 
 class _EmptyContentError(RuntimeError):
@@ -71,35 +114,18 @@ class ScriptGenerationError(Exception):
 # ---------------------------------------------------------------------------
 # Page context extraction
 # ---------------------------------------------------------------------------
-def extract_table_context(html: str, keep_rows: int = 8,
-                          max_chars: int = MAX_CONTEXT_CHARS) -> tuple[str, dict]:
-    """Reduce a full page HTML to a compact context for the LLM: the main
-    table with only its first ``keep_rows`` rows kept (the rest summarized in
-    a comment), scripts/styles stripped. Returns (context, info)."""
+def extract_body_context(html: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    """Reduce a full page HTML to a compact context for the LLM: the whole
+    <body> with scripts/styles/noscript/svg stripped, hard-capped at
+    ``max_chars`` chars. The page's data may live in a <table> or anywhere
+    else, so no structural assumptions are made."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
-
-    table = soup.find("table")
-    if table is None:
-        body = soup.body or soup
-        return str(body)[:max_chars], {"has_table": False, "rows": 0, "kept": 0}
-
-    rows = table.find_all("tr")
-    kept = rows[:keep_rows]
-    attrs = " ".join(
-        f'{k}="{" ".join(v) if isinstance(v, list) else v}"'
-        for k, v in table.attrs.items()
-    )
-    open_tag = f"<table {attrs}>" if attrs else "<table>"
-    context = open_tag + "".join(str(r) for r in kept)
-    if len(rows) > len(kept):
-        context += f"<!-- 其余 {len(rows) - len(kept)} 行数据省略，结构与上述行相同 -->"
-    context += "</table>"
-    info = {"has_table": True, "rows": len(rows), "kept": len(kept)}
+    context = str(soup.body or soup)
     if len(context) > max_chars:
         context = context[:max_chars] + "<!-- 片段过长已被截断 -->"
-    return context, info
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -191,37 +217,53 @@ def _check_structure(data, example) -> tuple[bool, str]:
     return True, f"结构校验通过，共 {len(records)} 条记录"
 
 
-def validate_script(code: str, reference_html: str | None,
-                    example) -> tuple[bool, str]:
+def validate_script(code: str, example, on_event=None) -> tuple[bool, str]:
+    """Compile the script, then run it for real (live fetch — the prompt's
+    page interactions happen inside the script) and check the output JSON's
+    structure against the example. No reference HTML involved: validation
+    must judge what the script actually scrapes. ``on_event(text, status)``
+    reports each validation step as it happens, for live UI progress."""
+
+    def emit(text: str, status: str = "info") -> None:
+        if on_event:
+            try:
+                on_event(text, status)
+            except Exception:  # noqa: BLE001 - progress reporting must not break validation
+                pass
+
+    emit("执行脚本语法编译", "running")
     try:
         compile(code, "generated_script.py", "exec")
     except SyntaxError as exc:
+        emit(f"脚本语法编译失败：{exc}", "fail")
         return False, f"语法错误: {exc}"
+    emit("脚本语法编译通过", "ok")
 
-    if not reference_html:
-        return True, "通过语法检查（无参考 HTML，跳过运行验证）"
-
+    emit("实时页面抓取（包含提示词要求）", "running")
+    run_started = time.time()
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        (td_path / "page.html").write_text(reference_html, encoding="utf-8")
         (td_path / "script.py").write_text(code, encoding="utf-8")
         out_path = td_path / "out.json"
         try:
             proc = subprocess.run(
-                [sys.executable, str(td_path / "script.py"),
-                 "--from-html", str(td_path / "page.html"), "-o", str(out_path)],
-                capture_output=True, text=True, timeout=DRYRUN_TIMEOUT_S, cwd=td,
+                [sys.executable, str(td_path / "script.py"), "-o", str(out_path)],
+                capture_output=True, text=True, timeout=LIVE_TIMEOUT_S, cwd=td,
             )
         except subprocess.TimeoutExpired:
-            return False, (f"运行验证超时（>{DRYRUN_TIMEOUT_S}s）——"
-                           "请确认 --from-html 模式不启动浏览器且解析高效")
+            emit(f"实时页面抓取超时（>{LIVE_TIMEOUT_S}s）", "fail")
+            return False, (f"实时页面抓取超时（>{LIVE_TIMEOUT_S}s）——"
+                           "请检查等待与页面交互逻辑是否过长或存在死循环")
+        run_s = time.time() - run_started
 
         # always surface what the script printed; it is the only diagnostic the
         # model gets on retry
         output_tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-1500:]
 
         if proc.returncode != 0:
-            return False, (f"脚本运行失败（exit {proc.returncode}）：\n{output_tail or '(无输出)'}")
+            emit(f"实时页面抓取失败（exit {proc.returncode}，{run_s:.0f}s）", "fail")
+            return False, (f"实时抓取页面失败（exit {proc.returncode}）：\n{output_tail or '(无输出)'}")
+        emit(f"实时页面抓取成功（{run_s:.0f}s）", "ok")
 
         output_file = out_path if out_path.exists() else None
         note = ""
@@ -231,7 +273,9 @@ def validate_script(code: str, reference_html: str | None,
             if others:
                 output_file = others[0]
                 note = f"⚠ 脚本未把输出写到 -o 指定路径（写到了 {output_file.name}），请修正；"
+                emit(note, "info")
             else:
+                emit("脚本没有写出输出 JSON（-o 路径和工作目录下都没有 .json 文件）", "fail")
                 return False, (
                     "脚本运行成功但没有写出输出 JSON：-o 指定路径和工作目录下都没有 .json 文件。"
                     "无论解析结果是否为空都必须写出 -o 指定的文件。"
@@ -240,9 +284,15 @@ def validate_script(code: str, reference_html: str | None,
         try:
             data = json.loads(output_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
+            emit("输出文件不是合法 JSON", "fail")
             return False, (f"输出文件不是合法 JSON: {exc}\n"
                            f"脚本 stdout/stderr 末尾内容：\n{output_tail or '(无输出)'}")
+    emit("结构校验（输出 vs 示例 JSON）", "running")
     ok, message = _check_structure(data, example)
+    if ok:
+        emit(f"{message}", "ok")
+    else:
+        emit(f"结构校验未通过：{message[:200]}", "fail")
     if ok and note:
         message = f"{note} {message}"
     return ok, message
@@ -251,15 +301,72 @@ def validate_script(code: str, reference_html: str | None,
 # ---------------------------------------------------------------------------
 # Generation loop
 # ---------------------------------------------------------------------------
+def _run_attempts(settings: dict, messages: list[dict],
+                  example, on_attempt=None, on_event=None) -> tuple[str, list[dict]]:
+    """Send ``messages`` to the LLM repeatedly, validating each answer
+    (syntax + live run + structure check) and feeding failures
+    back, up to MAX_ATTEMPTS rounds. Returns (code, attempts) or raises
+    ScriptGenerationError."""
+    attempts: list[dict] = []
+
+    def emit(text: str, status: str = "info") -> None:
+        if on_event:
+            try:
+                on_event(text, status)
+            except Exception:  # noqa: BLE001 - progress reporting must not break the loop
+                pass
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        emit(f"调用 LLM 编写脚本（第 {attempt} 轮）", "running")
+        chat_started = time.time()
+        try:
+            raw = _chat(settings, messages)
+        except _EmptyContentError as exc:
+            emit(f"调用 LLM 编写脚本失败（第 {attempt} 轮）", "fail")
+            attempts.append({"attempt": attempt, "ok": False, "message": str(exc)})
+            if on_attempt:
+                try:
+                    on_attempt(attempt, "", False, str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
+            messages.append({"role": "user", "content": (
+                f"上一次调用没有返回任何代码：{exc}\n请直接输出完整的 Python 脚本代码本体，"
+                "不要输出空内容。"
+            )})
+            continue
+        emit(f"调用 LLM 编写脚本成功（{time.time() - chat_started:.0f}s）", "ok")
+        code = _strip_fences(raw)
+        ok, message = validate_script(code, example, on_event=emit)
+        attempts.append({"attempt": attempt, "ok": ok, "message": message})
+        if on_attempt:
+            try:
+                on_attempt(attempt, code, ok, message)
+            except Exception:  # noqa: BLE001 - debugging hook must not break the loop
+                pass
+        if ok:
+            return code, attempts
+        emit(f"第 {attempt} 轮尝试未通过，已把具体错误反馈给 LLM", "info")
+        messages.append({"role": "assistant", "content": code})
+        messages.append({"role": "user", "content": (
+            f"上述脚本验证未通过：\n\n{message}\n\n"
+            "请修复问题后重新输出完整脚本（仍然只输出代码本体，不要解释）。"
+        )})
+    emit(f"{MAX_ATTEMPTS} 轮尝试均未通过验证", "fail")
+    raise ScriptGenerationError(
+        f"{MAX_ATTEMPTS} 轮尝试均未通过验证，最后一次错误：\n{attempts[-1]['message']}", attempts)
+
+
 def generate_script(settings: dict, config: dict, reference_html: str | None,
-                    on_attempt=None, images: list[str] | None = None) -> tuple[str, list[dict]]:
+                    on_attempt=None, images: list[str] | None = None,
+                    on_event=None) -> tuple[str, list[dict]]:
     """Call the LLM to write the whole script, validate, retry with feedback.
 
     Returns (code, attempts). ``on_attempt(attempt_no, code, ok, message)`` is
     called after every validation round (e.g. to keep failed code for
     debugging). ``images`` are data URLs attached to the prompt as vision
-    content blocks. Raises ScriptGenerationError when every attempt fails, and
-    RuntimeError for configuration/connection problems.
+    content blocks. ``on_event(text, status)`` reports each step as it
+    happens, for live UI progress. Raises ScriptGenerationError when every
+    attempt fails, and RuntimeError for configuration/connection problems.
     """
     missing = [k for k in ("base_url", "api_key", "model") if not settings.get(k)]
     if missing:
@@ -270,11 +377,9 @@ def generate_script(settings: dict, config: dict, reference_html: str | None,
     system = SYSTEM_PROMPT.format(output_default=f"{default_output}.json")
 
     if reference_html:
-        table_html, info = extract_table_context(reference_html)
-        table_note = f"完整表格共 {info['rows']} 行，下方保留前 {info['kept']} 行" \
-            if info["has_table"] else "页面中未找到 <table>，以下为去掉脚本/样式后的页面片段（请自行判断结构）"
+        table_html = extract_body_context(reference_html)
     else:
-        table_html, table_note = "（未能获取页面 HTML——请依据提示词与示例 JSON 编写，运行时做好容错与等待）", ""
+        table_html = "（未能获取页面 HTML——请依据提示词与示例 JSON 编写，运行时做好容错与等待）"
 
     user_text = USER_PROMPT.format(
         name=config["name"],
@@ -282,7 +387,6 @@ def generate_script(settings: dict, config: dict, reference_html: str | None,
         prompt=config.get("prompt") or "（未填写）",
         images_note=f"已随本消息附带 {len(images)} 张截图，请结合截图理解页面布局" if images else "（无）",
         example=json.dumps(config["example"], ensure_ascii=False, indent=2),
-        table_note=table_note,
         table_html=table_html,
     )
     if images:
@@ -298,36 +402,65 @@ def generate_script(settings: dict, config: dict, reference_html: str | None,
         {"role": "system", "content": system},
         user_message,
     ]
+    return _run_attempts(settings, messages, config["example"],
+                         on_attempt, on_event)
 
-    attempts: list[dict] = []
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            raw = _chat(settings, messages)
-        except _EmptyContentError as exc:
-            attempts.append({"attempt": attempt, "ok": False, "message": str(exc)})
-            if on_attempt:
-                try:
-                    on_attempt(attempt, "", False, str(exc))
-                except Exception:  # noqa: BLE001
-                    pass
-            messages.append({"role": "user", "content": (
-                f"上一次调用没有返回任何代码：{exc}\n请直接输出完整的 Python 脚本代码本体，"
-                "不要输出空内容。"
-            )})
-            continue
-        code = _strip_fences(raw)
-        ok, message = validate_script(code, reference_html, config["example"])
-        attempts.append({"attempt": attempt, "ok": ok, "message": message})
-        if on_attempt:
-            try:
-                on_attempt(attempt, code, ok, message)
-            except Exception:  # noqa: BLE001 - debugging hook must not break the loop
-                pass
-        if ok:
-            return code, attempts
-        messages.append({"role": "assistant", "content": code})
-        messages.append({"role": "user", "content": (
-            f"上述脚本验证未通过：\n\n{message}\n\n"
-            "请修复问题后重新输出完整脚本（仍然只输出代码本体，不要解释）。"
-        )})
-    raise ScriptGenerationError(f"{MAX_ATTEMPTS} 次尝试均未通过验证，最后一次错误：\n{attempts[-1]['message']}", attempts)
+
+def refine_script(settings: dict, config: dict, current_code: str,
+                  reference_html: str | None, feedback: str,
+                  prior_feedbacks: list[str] | None = None,
+                  result_excerpt: str = "", log_excerpt: str = "",
+                  on_attempt=None, images: list[str] | None = None) -> tuple[str, list[dict]]:
+    """Revise an already-generated script per the user's feedback.
+
+    The model sees the current script, the latest real run's output JSON and
+    log (when available), the captured table fragment and the example JSON,
+    and must output the complete revised script, which goes through the same
+    local validation loop as a fresh generation. ``prior_feedbacks`` are the
+    user's earlier feedback messages (already reflected in ``current_code``),
+    kept so the model does not undo previous rounds' fixes. ``images`` are
+    data URLs attached to this round's user message only (vision format);
+    they are never persisted.
+    """
+    missing = [k for k in ("base_url", "api_key", "model") if not settings.get(k)]
+    if missing:
+        raise RuntimeError("LLM 未配置：请先在「LLM 设置」中填写 " +
+                           "、".join({"base_url": "接口地址", "api_key": "API Key", "model": "模型名"}[k] for k in missing))
+
+    if reference_html:
+        table_html = extract_body_context(reference_html)
+    else:
+        table_html = "（无已保存的页面 HTML）"
+
+    prior_block = "\n".join(f"- {f}" for f in prior_feedbacks or []) or "（无）"
+    images = [u for u in (images or []) if isinstance(u, str)]
+    images_note = (f"已随本消息附带 {len(images)} 张截图，请结合截图理解本轮问题"
+                   if images else "（无）")
+    default_output = re.sub(r"[^0-9A-Za-z._-]+", "_", config["name"]).strip("_") or "output"
+    system = REFINE_SYSTEM_PROMPT.format(output_default=f"{default_output}.json")
+    user_text = REFINE_USER_PROMPT.format(
+        name=config["name"],
+        url=config["url"],
+        prompt=config.get("prompt") or "（未填写）",
+        example=json.dumps(config["example"], ensure_ascii=False, indent=2),
+        table_html=table_html,
+        current_code=current_code,
+        result_excerpt=result_excerpt.strip() or "（未找到运行输出）",
+        log_excerpt=log_excerpt.strip() or "（无运行日志）",
+        prior_block=prior_block,
+        images_note=images_note,
+        feedback=feedback,
+    )
+    if images:
+        # OpenAI vision format: text + image data URLs (this round only)
+        blocks: list[dict] = [{"type": "text", "text": user_text}]
+        for data_url in images:
+            blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+        user_message = {"role": "user", "content": blocks}
+    else:
+        user_message = {"role": "user", "content": user_text}
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        user_message,
+    ]
+    return _run_attempts(settings, messages, config["example"], on_attempt)
