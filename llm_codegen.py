@@ -40,8 +40,9 @@ SYSTEM_PROMPT = """你是一名资深 Python 爬虫工程师。请根据用户�
 3. 抓取流程：page.goto(url, wait_until="domcontentloaded") → 等待目标表格/主要内容渲染（适当 wait_for_selector + sleep）→ 若提示词要求页面上有额外的交互（点击、展开、切换等），实现该操作并等待 → page.content() 取整页 HTML → 解析。
 4. 解析逻辑由你根据真实 HTML 片段与截图自行设计（如何定位表格、如何处理分组表头与列头、如何归属列到分组）；要稳健：选择器容错、等待充分，不要假设列数固定不变。
 5. 输出 JSON 结构必须与示例 JSON 完全一致：相同的顶层键与嵌套分组、相同的键名；页面中匹配不到的列直接丢弃；缺失值（如 "--"）输出为空字符串 ""；不要发明示例中不存在的键。
-6. 脚本必须支持命令行参数：-o/--output（输出 JSON 路径，默认 {output_default}）、--url（覆盖 URL）、--headed（有头模式）、--from-html <file>（直接解析已保存的 HTML 文件，绝不启动浏览器）、--save-html <file>（保存 page.content() 原始 HTML）。无论哪种模式、解析结果是否为空，都必须把结果 JSON 写到 -o/--output 指定的路径（解析为空时写出空数组）。
-7. 只输出 Python 代码本体：不要 markdown 代码围栏，不要任何解释文字。"""
+6. 示例 JSON 中键名以 * 开头的分组是「动态占位组」（如 "*models"）：表示输出时要把占位组替换为若干顶层分组——键名取自输出记录中 models 数组（即 * 后面的字段名）的每个真实值，每个分组的内部结构与占位组的值完全一致；models 数组本身必须填页面上的真实值（示例里的元素如 AAA、BBB 只是占位示意）。输出中绝不能保留任何 "*..." 占位键，也不能出现示例里的占位示意值。
+7. 脚本必须支持命令行参数：-o/--output（输出 JSON 路径，默认 {output_default}）、--url（覆盖 URL）、--headed（有头模式）、--from-html <file>（直接解析已保存的 HTML 文件，绝不启动浏览器）、--save-html <file>（保存 page.content() 原始 HTML）。无论哪种模式、解析结果是否为空，都必须把结果 JSON 写到 -o/--output 指定的路径（解析为空时写出空数组）。
+8. 只输出 Python 代码本体：不要 markdown 代码围栏，不要任何解释文字。"""
 
 USER_PROMPT = """【数据源配置】
 名称：{name}
@@ -64,7 +65,7 @@ REFINE_SYSTEM_PROMPT = """你是一名资深 Python 爬虫工程师。用户已�
 1. 单文件脚本；依赖只允许 playwright、beautifulsoup4 和 Python 标准库。
 2. 浏览器必须用 Playwright 自带 Chromium：p.chromium.launch(headless=...)，禁止使用 channel 参数，禁止下载浏览器。
 3. 保持命令行参数约定不变：-o/--output（输出 JSON 路径，默认 {output_default}）、--url（覆盖 URL）、--headed（有头模式）、--from-html <file>（直接解析已保存的 HTML 文件，绝不启动浏览器）、--save-html <file>（保存 page.content() 原始 HTML）。无论哪种模式、解析结果是否为空，都必须把结果 JSON 写到 -o/--output 指定的路径（解析为空时写出空数组）。
-4. 输出 JSON 结构必须与示例 JSON 完全一致：相同的顶层键与嵌套分组、相同的键名——除非用户在修改要求中明确要求改变结构；页面中匹配不到的列直接丢弃；缺失值（如 "--"）输出为空字符串 ""。
+4. 输出 JSON 结构必须与示例 JSON 完全一致：相同的顶层键与嵌套分组、相同的键名——除非用户在修改要求中明确要求改变结构；页面中匹配不到的列直接丢弃；缺失值（如 "--"）输出为空字符串 ""。示例中键名以 * 开头的分组是动态占位组（如 "*models"）：输出时按对应数组（* 后面的字段名）的每个真实值展开为顶层分组，不得保留占位键。
 5. 只输出 Python 代码本体：不要 markdown 代码围栏，不要任何解释文字。"""
 
 REFINE_USER_PROMPT = """【数据源配置】
@@ -182,6 +183,10 @@ def _shape(record: dict) -> dict:
 
 
 def _check_structure(data, example) -> tuple[bool, str]:
+    """Compare the run output against the example JSON. Keys starting with
+    "*" in the example are dynamic placeholders ("*models" = one top-level
+    group per value of the record's "models" array — the real values only
+    exist at runtime), each group shaped like the placeholder's value."""
     records = data if isinstance(data, list) else [data]
     examples = example if isinstance(example, list) else [example]
     if not records or not all(isinstance(r, dict) for r in records):
@@ -194,26 +199,53 @@ def _check_structure(data, example) -> tuple[bool, str]:
             continue
         for key, value in rec.items():
             if isinstance(value, dict):
-                want[key] = want.get(key) or set()
-                want[key] |= set(value.keys())
+                want[key] = (want.get(key) or set()) | set(value.keys())
             else:
                 want[key] = None
 
-    got = _shape(records[0])
-    if set(got.keys()) != set(want.keys()):
-        return False, (f"顶层键不一致\n  期望: {sorted(want)}\n  实际: {sorted(got)}")
-    for key, sub in want.items():
-        g = got.get(key)
-        if sub is None and g is not None:
-            return False, f"键 {key!r} 应为标量，实际是对象"
-        if sub is not None:
-            if g is None:
-                return False, f"分组 {key!r} 应为对象，实际是标量"
-            if set(g) != set(sub):
-                return False, f"分组 {key!r} 的子键不一致\n  期望: {sorted(sub)}\n  实际: {sorted(g)}"
+    placeholders = {k: v for k, v in want.items() if k.startswith("*") and isinstance(v, set)}
+    static = {k: v for k, v in want.items() if k not in placeholders}
+
     for i, rec in enumerate(records):
-        if set(_shape(rec).keys()) != set(want.keys()):
-            return False, f"第 {i + 1} 条记录的顶层键与示例不一致"
+        got = _shape(rec)
+        got_keys = set(got.keys())
+        where = f"第 {i + 1} 条记录" if len(records) > 1 else "输出"
+
+        missing = set(static) - got_keys
+        if missing:
+            return False, f"{where}缺少键\n  期望: {sorted(missing)}"
+
+        # resolve the placeholder into the concrete dynamic keys of this record
+        dynamic: dict[str, set] = {}
+        for ph_key, sub in placeholders.items():
+            ref = ph_key[1:]
+            if ph_key in got_keys:
+                return False, (f"{where}不应保留占位键 {ph_key!r}——"
+                               f"请按 {ref!r} 数组里的真实值展开为顶层分组")
+            vals = rec.get(ref)
+            if not (isinstance(vals, list) and vals
+                    and all(isinstance(v, str) and v for v in vals)):
+                return False, (f"{where}的 {ref!r} 应为非空字符串数组"
+                               f"（它是占位组 {ph_key!r} 的展开依据，请填页面上的真实值）")
+            for v in vals:
+                if v in static:
+                    return False, f"{where}的 {ref!r} 值 {v!r} 与示例的固定键冲突"
+                dynamic[v] = sub
+
+        extra = got_keys - set(static) - set(dynamic)
+        if extra:
+            return False, (f"{where}存在示例中不存在的键（不得发明键）\n  多出: {sorted(extra)}")
+
+        for key, sub in list(static.items()) + list(dynamic.items()):
+            g = got.get(key)
+            if sub is None and g is not None:
+                return False, f"{where}键 {key!r} 应为标量，实际是对象"
+            if sub is not None:
+                if g is None:
+                    return False, f"{where}分组 {key!r} 应为对象，实际是标量或缺失"
+                if set(g) != set(sub):
+                    return False, (f"{where}分组 {key!r} 的子键不一致\n"
+                                   f"  期望: {sorted(sub)}\n  实际: {sorted(g)}")
     return True, f"结构校验通过，共 {len(records)} 条记录"
 
 

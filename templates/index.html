@@ -54,6 +54,7 @@
     border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer;
     background: var(--primary); color: #fff; font-family: inherit; text-decoration: none; display: inline-block;
   }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
   .btn:hover { background: var(--primary-dark); }
   .btn.secondary { background: #eef2f7; color: var(--text); border: 1px solid var(--border); }
   .btn.secondary:hover { background: #e2e8f0; }
@@ -615,10 +616,19 @@ function renderChat() {
   const box = $('chat-history');
   if (!box) return;
   box.innerHTML = chatHistory.map(m => {
-    const attach = m.imgCount ? `\n📎 附图 ×${m.imgCount}（仅本轮发送）` : '';
+    const attach = m.imgCount ? `\n📎 附图 ×${m.imgCount}（保存时并入提示词配图）` : '';
     return `<div class="chat-msg ${m.role}${m.err ? ' err' : ''}">${escapeHtml(m.text + attach)}</div>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
+}
+
+function chatExtras() {
+  // AI 调试对话里用户的全部输入：文本追加进提示词，图片并入提示词配图（点「保存」时生效）
+  const msgs = chatHistory.filter(m => m.role === 'user');
+  return {
+    text: msgs.map(m => m.text).join('\n\n'),
+    images: msgs.flatMap(m => m.images || []),
+  };
 }
 
 async function sendRefine() {
@@ -629,7 +639,7 @@ async function sendRefine() {
   const text = $('chat-input').value.trim();
   if (!text) return;
   const attachedImages = chatImages.map(it => it.dataUrl);
-  chatHistory.push({ role: 'user', text, imgCount: attachedImages.length });
+  chatHistory.push({ role: 'user', text, images: attachedImages, imgCount: attachedImages.length });
   chatHistory.push({ role: 'ai', text: '正在结合当前脚本、最近运行输出与页面表格片段修改脚本，并进行本地验证（可能需要几分钟）…' });
   renderChat();
   $('chat-input').value = '';
@@ -679,12 +689,14 @@ function closeFormModal() { $('form-mask').style.display = 'none'; }
 $('form-mask').addEventListener('click', (e) => { if (e.target === $('form-mask')) closeFormModal(); });
 
 async function saveSource() {
+  const chat = chatExtras();
+  const promptBase = $('f-prompt').value.trim();
   const payload = {
     name: $('f-name').value,
     url: $('f-url').value,
-    prompt: $('f-prompt').value,
+    prompt: chat.text ? (promptBase ? promptBase + '\n\n' + chat.text : chat.text) : $('f-prompt').value,
     example: $('f-example').value,
-    images: formImages.map(it => it.dataUrl || it.name),
+    images: formImages.map(it => it.dataUrl || it.name).concat(chat.images),
   };
   $('btn-save').disabled = true;
   try {
@@ -710,6 +722,28 @@ async function deleteSource(id) {
   try {
     await api(`/api/sources/${id}`, { method: 'DELETE' });
     toast('已删除');
+    await loadSources();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function copySource(id) {
+  try {
+    const result = await api(`/api/sources/${id}/copy`, { method: 'POST', body: '{}' });
+    toast('已复制为：' + result.name);
+    await loadSources();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function resetSource(id) {
+  const s = sources.find(x => x.id === id);
+  if (!confirm(`确认重置「${s ? s.name : id}」？将删除已生成的脚本及全部运行产物（配图保留），可用「初始化」重新生成。`)) return;
+  try {
+    await api(`/api/sources/${id}/reset`, { method: 'POST', body: '{}' });
+    toast('已重置，可重新初始化');
     await loadSources();
   } catch (err) {
     toast(err.message, true);
@@ -784,7 +818,7 @@ async function generateSource(id) {
     $('modal-validation').textContent = '❌ ' + err.message + '（详情见下方进度）';
     toast('脚本生成失败，详情见弹窗', true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '初始化'; }
+    await loadSources();  // re-render so the button flips between 初始化/重置
   }
 }
 
@@ -888,11 +922,14 @@ function render() {
       </td>
       <td>
         <div class="row-actions">
-          <button class="btn small" data-gen="${s.id}" onclick="generateSource('${s.id}')">初始化</button>
-          <button class="btn small secondary" data-run="${s.id}" onclick="runScript('${s.id}')">测试脚本</button>
-          <button class="btn small secondary" onclick="downloadScript('${s.id}')">下载脚本</button>
-          <button class="btn small secondary" onclick="openFormModal('${s.id}')">编辑</button>
-          <button class="btn small danger" onclick="deleteSource('${s.id}')">删除</button>
+          ${s.initialized
+            ? `<button class="btn small secondary" data-gen="${s.id}" onclick="resetSource('${s.id}')">重置</button>`
+            : `<button class="btn small" data-gen="${s.id}" onclick="generateSource('${s.id}')">初始化</button>`}
+          <button class="btn small secondary" data-run="${s.id}" onclick="runScript('${s.id}')" ${s.initialized ? '' : 'disabled'}>测试脚本</button>
+          <button class="btn small secondary" onclick="downloadScript('${s.id}')" ${s.initialized ? '' : 'disabled'}>下载脚本</button>
+          <button class="btn small secondary" onclick="copySource('${s.id}')">复制</button>
+          <button class="btn small secondary" onclick="openFormModal('${s.id}')" ${s.initialized ? 'disabled' : ''}>编辑</button>
+          <button class="btn small danger" onclick="deleteSource('${s.id}')" ${s.initialized ? 'disabled' : ''}>删除</button>
         </div>
       </td>
     </tr>`;

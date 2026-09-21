@@ -85,9 +85,10 @@ _IMAGE_NAME_RE = re.compile(r"[\w.-]+\.(png|jpg|jpeg|gif|webp)")
 def _process_images(source: dict, entries) -> list[str]:
     """Persist prompt images for a source. ``entries`` mixes data URLs (new
     uploads from the browser) and existing filenames (kept ones); files no
-    longer referenced are removed. Returns the stored filenames."""
+    longer referenced are removed. Returns the stored filenames. The group
+    directory is only created when there is something to store — creating or
+    editing a source without images leaves no trace under data/."""
     directory = _source_dir(source) / "uploads"
-    directory.mkdir(parents=True, exist_ok=True)
     kept: list[str] = []
     for entry in entries or []:
         if not isinstance(entry, str):
@@ -98,6 +99,7 @@ def _process_images(source: dict, entries) -> list[str]:
                 continue
             ext = "jpg" if match.group(1) in ("jpeg", "jpg") else match.group(1)
             name = f"img_{len(kept) + 1}_{int(time.time() * 1000) % 10**9}.{ext}"
+            directory.mkdir(parents=True, exist_ok=True)
             try:
                 (directory / name).write_bytes(base64.b64decode(match.group(2)))
             except (ValueError, OSError):
@@ -105,9 +107,16 @@ def _process_images(source: dict, entries) -> list[str]:
             kept.append(name)
         elif _IMAGE_NAME_RE.fullmatch(entry) and (directory / entry).exists():
             kept.append(entry)
-    for existing in directory.iterdir():
-        if existing.name not in kept:
-            existing.unlink(missing_ok=True)
+    if directory.is_dir():
+        for existing in directory.iterdir():
+            if existing.name not in kept:
+                existing.unlink(missing_ok=True)
+        if not kept and not any(directory.iterdir()):
+            try:
+                directory.rmdir()  # nothing left: no empty dirs under data/
+                _source_dir(source).rmdir()  # drop the group dir too when empty
+            except OSError:
+                pass
     return kept
 
 
@@ -149,6 +158,16 @@ def _try_replace(src: Path, dst: Path) -> None:
             time.sleep(0.4)
 
 
+def _owned_artifact(f: Path, sid: str) -> bool:
+    """True when the file in a group's generated/ directory belongs to the
+    source with this id. Must not use f.stem: double-suffix artifacts like
+    '<id>.page.html' / '<id>.run.log' have stem '<id>.page' / '<id>.run'."""
+    if not f.name.startswith(sid):
+        return False
+    rest = f.name[len(sid):]
+    return rest == "" or rest.startswith("_") or rest.startswith(".")
+
+
 def _move_group_files(source: dict, old_name: str) -> None:
     """Carry a source's files along when a rename changes its group directory.
     Only its own artifacts (id-prefixed files plus the upload images) move, so
@@ -164,7 +183,7 @@ def _move_group_files(source: dict, old_name: str) -> None:
     old_gen = old_dir / "generated"
     if old_gen.is_dir():
         for f in old_gen.iterdir():
-            if f.stem == sid or f.stem.startswith(sid + "_"):
+            if _owned_artifact(f, sid):
                 _try_replace(f, new_dir / "generated" / f.name)
     old_up = old_dir / "uploads"
     if old_up.is_dir():
@@ -186,7 +205,7 @@ def _delete_source_files(source: dict) -> None:
     gen = group / "generated"
     if gen.is_dir():
         for f in gen.iterdir():
-            if f.stem == sid or f.stem.startswith(sid + "_"):
+            if _owned_artifact(f, sid):
                 try:
                     f.unlink(missing_ok=True)
                 except OSError:  # a locked file keeps the directory around
@@ -335,6 +354,8 @@ def list_sources():
         sources = [s for s in sources if name in s["name"].lower()]
     if url:
         sources = [s for s in sources if url in s["url"].lower()]
+    for s in sources:  # has a generated script? drives the 初始化/重置 button
+        s["initialized"] = _script_path(s).exists()
     return jsonify(sources)
 
 
@@ -375,6 +396,72 @@ def delete_source(source_id: str):
         return jsonify({"error": "数据源不存在"}), 404
     storage.delete_source(source_id)
     _delete_source_files(source)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/sources/<source_id>/copy")
+def copy_source(source_id: str):
+    """Duplicate a source: same url/prompt/example/images, new id, and a name
+    of '<name> Copy', then '<name> Copy_2', '<name> Copy_3', … The generated
+    script is NOT copied — the new source needs its own 初始化."""
+    source = storage.get_source(source_id)
+    if source is None:
+        return jsonify({"error": "数据源不存在"}), 404
+
+    existing = {s["name"] for s in storage.list_sources()}
+    name = f"{source['name']} Copy"
+    n = 2
+    while name in existing:
+        name = f"{source['name']} Copy_{n}"
+        n += 1
+
+    now = datetime.now().isoformat(timespec="seconds")
+    new_source = {"id": uuid.uuid4().hex[:12], "name": name,
+                  "url": source["url"], "prompt": source["prompt"],
+                  "example": source["example"], "images": [],
+                  "created_at": now, "updated_at": now}
+
+    # carry the prompt images over (same filenames, new group directory)
+    old_uploads = _source_dir(source) / "uploads"
+    if source.get("images") and old_uploads.is_dir():
+        new_uploads = _source_dir(new_source) / "uploads"
+        new_uploads.mkdir(parents=True, exist_ok=True)
+        kept = []
+        for fname in source["images"]:
+            f = old_uploads / fname
+            if f.is_file():
+                try:
+                    shutil.copy2(str(f), str(new_uploads / fname))
+                    kept.append(fname)
+                except OSError:
+                    pass
+        new_source["images"] = kept
+
+    storage.insert_source(new_source)
+    return jsonify(new_source), 201
+
+
+@app.post("/api/sources/<source_id>/reset")
+def reset_source(source_id: str):
+    """Undo 初始化: remove the source's artifacts under data/<name>/generated/
+    (script, outputs, page snapshot, logs). Prompt images (uploads/) are part
+    of the config and are kept."""
+    source = storage.get_source(source_id)
+    if source is None:
+        return jsonify({"error": "数据源不存在"}), 404
+    gen = _source_dir(source) / "generated"
+    sid = source["id"]
+    if gen.is_dir():
+        for f in gen.iterdir():
+            if _owned_artifact(f, sid):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        try:
+            gen.rmdir()  # only when nothing (of any source) is left inside
+        except OSError:
+            pass
     return jsonify({"ok": True})
 
 
