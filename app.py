@@ -44,6 +44,10 @@ storage.init_db()
 
 app = Flask(__name__)
 app.json.sort_keys = False  # keep JSON key order as configured by the user
+# pick up index.html edits on reload even with debug off — the no-cache header
+# above intends exactly that, but Jinja caches compiled templates otherwise
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
 
 
 # ---------------------------------------------------------------------------

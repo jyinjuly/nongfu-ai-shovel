@@ -66,7 +66,8 @@
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
-  td .name { font-weight: 600; }
+  td .name { font-weight: 600; color: var(--primary); cursor: pointer; }
+  td .name:hover { text-decoration: underline; }
   td .url { color: var(--muted); font-size: 12px; word-break: break-all; }
   td .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
   .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -109,6 +110,11 @@
     color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; line-height: 1.55;
   }
   .modal > footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; }
+  /* 详情态：与编辑态同一弹窗，只读展示并隐藏全部操作按钮（.edit-only / footer） */
+  #form-mask.readonly input:not([type="file"]), #form-mask.readonly textarea { background: #f6f8fb; }
+  #form-mask.readonly input:focus, #form-mask.readonly textarea:focus { outline: none; }
+  #form-mask.readonly .edit-only { display: none !important; }
+  #form-mask.readonly > .modal > footer { display: none; }
   #gen-progress {
     margin: 0 18px 12px; padding: 10px 14px; background: #f6f8fb; border: 1px solid var(--border);
     border-radius: 8px; max-height: 200px; overflow: auto; font-size: 12.5px; line-height: 2; flex-shrink: 0;
@@ -245,11 +251,11 @@
     <div class="modal-body">
       <div class="grid">
         <div class="field">
-          <label>名称 <span class="hint">*</span></label>
+          <label>名称 <span class="hint edit-only">*</span></label>
           <input type="text" id="f-name" placeholder="数据源名称">
         </div>
         <div class="field">
-          <label>URL <span class="hint">*</span></label>
+          <label>URL <span class="hint edit-only">*</span></label>
           <input type="text" id="f-url" placeholder="https://...">
         </div>
         <div class="field full">
@@ -260,12 +266,12 @@
           <label>提示词配图 <span class="hint">支持 Ctrl+V 粘贴（需模型支持视觉）</span></label>
           <input type="file" id="f-images" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
           <div style="display:flex; gap:8px; align-items:center;">
-            <button class="btn small secondary" type="button" onclick="choosePromptImages()">选择文件</button>
+            <button class="btn small secondary edit-only" type="button" onclick="choosePromptImages()">选择文件</button>
             <span class="hint" id="f-images-count"></span>
           </div>
           <div id="image-previews" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
         </div>
-        <div class="field">
+        <div class="field edit-only">
           <label>上传示例 JSON <span class="hint">上传后填充到下方文本框，可直接编辑</span></label>
           <input type="file" id="f-file" accept=".json,application/json" hidden>
           <div style="display:flex; gap:8px; align-items:center;">
@@ -280,7 +286,7 @@
           <label>示例 JSON <span class="hint">* 决定输出结构：LLM 以此为输出生成的契约</span></label>
           <textarea id="f-example" class="code" placeholder='[{"Model": "...", "Features": {"Context Window": "1M", ...}}]'></textarea>
         </div>
-        <div class="field full" id="chat-field" style="border-top:1px solid var(--border); padding-top:16px;">
+        <div class="field full edit-only" id="chat-field" style="border-top:1px solid var(--border); padding-top:16px;">
           <label>AI 调试对话 <span class="hint">测试脚本发现输出 JSON 有问题时，在这里与 LLM 对话进行调整</span></label>
           <div id="chat-history" class="chat-history"></div>
           <div style="display:flex; gap:8px; margin-top:8px; align-items:flex-end;">
@@ -475,12 +481,13 @@ async function loadSources() {
 
 let formImages = [];  // {name, previewUrl} existing | {dataUrl} newly added
 let chatImages = [];  // {dataUrl} 对话配图，仅随本轮发送，不保存
+let formReadonly = false;  // 详情态：只读展示，隐藏全部操作按钮
 
 function renderImagePreviews() {
   $('image-previews').innerHTML = formImages.map((it, i) => `
     <div class="img-thumb">
       <img src="${it.previewUrl || it.dataUrl}" title="${it.name || '新配图'}（点击预览）">
-      <span class="rm" onclick="removeImage(${i})">×</span>
+      <span class="rm edit-only" onclick="removeImage(${i})">×</span>
     </div>`).join('');
   const countEl = $('f-images-count');
   if (countEl) countEl.textContent = formImages.length ? `已选 ${formImages.length} 张` : '';
@@ -550,6 +557,7 @@ $('chat-img-file').addEventListener('change', (e) => {
 // Ctrl+V 粘贴剪贴板截图：焦点在 AI 对话区时贴给本轮对话配图，否则贴给提示词配图
 // （仅在剪贴板内容为图片时拦截，不影响文本粘贴）
 $('form-mask').addEventListener('paste', (e) => {
+  if (formReadonly) return;  // 详情态不接受粘贴配图
   const items = (e.clipboardData || {}).items;
   if (!items) return;
   const inChat = !!(e.target && e.target.closest && e.target.closest('#chat-field'));
@@ -588,10 +596,12 @@ $('f-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-function openFormModal(id = null) {
-  editingId = id;
+function openFormModal(id = null, readonly = false) {
+  editingId = readonly ? null : id;  // 详情态不绑定编辑目标，杜绝误保存
+  formReadonly = readonly;
   const s = id ? sources.find(x => x.id === id) : null;
-  $('form-title').textContent = s ? `编辑数据源：${s.name}` : '新增数据源';
+  $('form-title').textContent = readonly ? `数据源详情：${s ? s.name : ''}`
+    : s ? `编辑数据源：${s.name}` : '新增数据源';
   $('f-name').value = s ? s.name : '';
   $('f-url').value = s ? s.url : '';
   $('f-prompt').value = s ? (s.prompt || '') : '';
@@ -599,6 +609,8 @@ function openFormModal(id = null) {
     .map(name => ({ name, previewUrl: `/api/sources/${s.id}/images/${name}` }));
   renderImagePreviews();
   $('f-example').value = s ? JSON.stringify(s.example, null, 2) : '';
+  for (const el of [$('f-name'), $('f-url'), $('f-prompt'), $('f-example')]) el.readOnly = readonly;
+  $('form-mask').classList.toggle('readonly', readonly);
   chatHistory = [];
   chatFeedbacks = [];
   chatImages = [];
@@ -689,6 +701,7 @@ function closeFormModal() { $('form-mask').style.display = 'none'; }
 $('form-mask').addEventListener('click', (e) => { if (e.target === $('form-mask')) closeFormModal(); });
 
 async function saveSource() {
+  if (formReadonly) return;
   const chat = chatExtras();
   const promptBase = $('f-prompt').value.trim();
   const payload = {
@@ -912,7 +925,7 @@ function render() {
     const groups = first ? Object.keys(first).filter(k => typeof first[k] === 'object').length : 0;
     return `<tr>
       <td>
-        <div class="name">${escapeHtml(s.name)}</div>
+        <div class="name" title="点击查看详情" onclick="openFormModal('${s.id}', true)">${escapeHtml(s.name)}</div>
         <div class="url">${escapeHtml(s.url)}</div>
         <div class="meta">更新于 ${escapeHtml(s.updated_at || '')}</div>
       </td>
